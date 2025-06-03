@@ -3,7 +3,6 @@ import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcryptjs';
 import { PrismaService } from 'src/prisma/prisma.service';
 import { RegisterDto } from 'src/auth/dto/register.dto';
-// import { UserType } from 'generated/prisma';
 
 @Injectable()
 export class AuthService {
@@ -29,19 +28,30 @@ export class AuthService {
         name: registerDto.name ?? 'Default Name',
         password: hashedPassword,
       },
+      select: {
+        id: true,
+        email: true,
+        name: true,
+        user_type: true,
+        phone: true,
+      },
     });
 
-    // if (registerDto.user_type === UserType.land_owner) {
-    //   await this.prisma.landOwners.create({
-    //     data: {
-    //       user_id: user.id,
-    //       document_id: 'DOC-123',
-    //     },
-    //   });
-    // }
+    const payload = {
+      sub: user.id,
+      email: user.email,
+      type: user.user_type,
+    };
 
     return {
-      access_token: this.jwtService.sign({ sub: user.id, email: user.email }),
+      access_token: this.jwtService.sign(payload),
+      user: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        user_type: user.user_type,
+        phone: user.phone,
+      },
     };
   }
 
@@ -52,9 +62,21 @@ export class AuthService {
       throw new Error('Credenciais inválidas');
     }
 
+    const payload = {
+      sub: user.id,
+      email: user.email,
+      type: user.user_type,
+    };
+
     return {
-      access_token: this.jwtService.sign({ sub: user.id, email: user.email }),
-      user_type: user.user_type,
+      access_token: this.jwtService.sign(payload),
+      user: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        user_type: user.user_type,
+        phone: user.phone,
+      },
     };
   }
 }

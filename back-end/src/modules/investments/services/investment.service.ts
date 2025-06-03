@@ -1,8 +1,16 @@
-import { Injectable, BadRequestException } from '@nestjs/common';
+import {
+  BadRequestException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { CreateInvestmentDto } from '../dto/create-investments.dto';
 import { UpdateInvestmentDto } from '../dto/update-investments.dto';
 import { PrismaService } from 'src/prisma/prisma.service';
-import { Agreement, InvestmentStatus } from 'generated/prisma';
+import {
+  Agreement,
+  InvestmentStatus,
+  SolarProjectStatus,
+} from 'generated/prisma';
 
 @Injectable()
 export class InvestmentService {
@@ -11,45 +19,425 @@ export class InvestmentService {
   async create(createInvestmentDto: CreateInvestmentDto, userId: string) {
     const investor = await this.prisma.investors.findUnique({
       where: { user_id: userId },
+      select: { id: true },
+    });
+    if (!investor) {
+      throw new BadRequestException(
+        'Only users registered as investors can create investments.',
+      );
+    }
+
+    const project = await this.prisma.projects.findUnique({
+      where: { id: createInvestmentDto.project_id },
+      select: {
+        id: true,
+        status: true,
+        company_id: true,
+        land: { select: { owner_id: true } },
+      },
     });
 
-    if (!investor) {
-      throw new BadRequestException('Usuário não tem perfil de investidor.');
+    if (!project) {
+      throw new NotFoundException(
+        `Project with ID "${createInvestmentDto.project_id}" not found.`,
+      );
+    }
+
+    if (project.status !== SolarProjectStatus.active) {
+      throw new BadRequestException(
+        `Project is not active and cannot receive investments. Current status: ${project.status}`,
+      );
     }
 
     return this.prisma.investments.create({
       data: {
-        project_id: createInvestmentDto.project_id,
+        ...createInvestmentDto,
         investor_id: investor.id,
-        value_invested: String(createInvestmentDto.value_invested),
-        title: createInvestmentDto.title ?? null,
-        description: createInvestmentDto.description ?? null,
-        owner_agree: createInvestmentDto.owner_agree ?? Agreement.pending,
-        company_agree: createInvestmentDto.company_agree ?? Agreement.pending,
-        status: createInvestmentDto.status ?? InvestmentStatus.pending,
+        project_id: createInvestmentDto.project_id,
       },
     });
   }
 
   async findAll() {
-    return this.prisma.investments.findMany();
-  }
-
-  async findOne(id: string) {
-    return this.prisma.investments.findUnique({
-      where: { id },
+    return this.prisma.investments.findMany({
+      include: {
+        investor: {
+          select: { id: true, user: { select: { email: true } } },
+        },
+        project: {
+          select: {
+            id: true,
+            title: true,
+            company_id: true,
+            land: { select: { owner_id: true } },
+          },
+        },
+      },
     });
   }
 
+  async findInvestmentsByLandOwnerUserId(
+    userId: string,
+    status?: InvestmentStatus,
+  ) {
+    const landOwner = await this.prisma.landOwners.findUnique({
+      where: { user_id: userId },
+      select: { id: true },
+    });
+
+    if (!landOwner) {
+      throw new NotFoundException(
+        'Land Owner profile not found for this user.',
+      );
+    }
+
+    const lands = await this.prisma.lands.findMany({
+      where: {
+        owner_id: landOwner.id,
+      },
+      select: { id: true },
+    });
+
+    if (lands.length === 0) {
+      return [];
+    }
+
+    const landIds = lands.map((land) => land.id);
+
+    const projects = await this.prisma.projects.findMany({
+      where: {
+        land_id: {
+          in: landIds,
+        },
+      },
+      select: { id: true },
+    });
+
+    if (projects.length === 0) {
+      return [];
+    }
+
+    const projectIds = projects.map((project) => project.id);
+
+    return this.prisma.investments.findMany({
+      where: {
+        project_id: {
+          in: projectIds,
+        },
+        status: status ? status : undefined,
+      },
+      include: {
+        project: {
+          select: {
+            title: true,
+            power_kw: true,
+            cost: true,
+            land: {
+              select: {
+                state: true,
+                city: true,
+              },
+            },
+          },
+        },
+        investor: {
+          select: {
+            user: {
+              select: {
+                email: true,
+                phone: true,
+              },
+            },
+          },
+        },
+      },
+      orderBy: {
+        invested_date: 'desc',
+      },
+    });
+  }
+
+  async findInvestmentsByCompanyUserId(
+    userId: string,
+    status?: InvestmentStatus,
+  ) {
+    const company = await this.prisma.companies.findUnique({
+      where: { user_id: userId },
+      select: { id: true },
+    });
+
+    if (!company) {
+      throw new NotFoundException('Company profile not found for this user.');
+    }
+
+    const projects = await this.prisma.projects.findMany({
+      where: {
+        company_id: company.id,
+      },
+      select: { id: true },
+    });
+
+    if (projects.length === 0) {
+      return [];
+    }
+
+    const projectIds = projects.map((project) => project.id);
+
+    return this.prisma.investments.findMany({
+      where: {
+        project_id: {
+          in: projectIds,
+        },
+        status: status ? status : undefined,
+      },
+      include: {
+        project: {
+          select: {
+            title: true,
+            power_kw: true,
+            cost: true,
+            land: {
+              select: {
+                city: true,
+                owner: {
+                  select: {
+                    user: {
+                      select: {
+                        name: true,
+                        email: true,
+                        phone: true,
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+        investor: {
+          select: {
+            document_id: true,
+            user: {
+              select: {
+                email: true,
+                phone: true,
+              },
+            },
+          },
+        },
+      },
+      orderBy: {
+        invested_date: 'desc',
+      },
+    });
+  }
+
+  async findInvestmentsByInvestorUserId(
+    userId: string,
+    status: InvestmentStatus | undefined,
+  ) {
+    const investor = await this.prisma.investors.findUnique({
+      where: { user_id: userId },
+      select: { id: true },
+    });
+
+    if (!investor) {
+      throw new NotFoundException('Investor profile not found for this user.');
+    }
+
+    return this.prisma.investments.findMany({
+      where: {
+        investor_id: investor.id,
+        status: status ? status : undefined,
+      },
+      include: {
+        project: {
+          select: {
+            id: true,
+            title: true,
+            description: true,
+            power_kw: true,
+            cost: true,
+            status: true,
+            land: {
+              select: {
+                city: true,
+              },
+            },
+            company: {
+              select: {
+                company_name: true,
+                user: {
+                  select: {
+                    name: true,
+                    email: true,
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+      orderBy: {
+        invested_date: 'desc',
+      },
+    });
+  }
+
+  async findOne(id: string) {
+    const investment = await this.prisma.investments.findUnique({
+      where: { id },
+      include: {
+        investor: {
+          select: {
+            id: true,
+            user: { select: { email: true, user_type: true, name: true } },
+          },
+        },
+        project: {
+          select: {
+            id: true,
+            title: true,
+            company_id: true,
+            land: { select: { owner_id: true } },
+          },
+        },
+      },
+    });
+    if (!investment) {
+      throw new NotFoundException(`Investment with ID "${id}" not found.`);
+    }
+    return investment;
+  }
+
+  async respondToInvestment(
+    investmentId: string,
+    userId: string,
+    userType: 'LandOwner' | 'Company',
+    response: 'accept' | 'reject',
+  ) {
+    const investment = await this.prisma.investments.findUnique({
+      where: { id: investmentId },
+      include: {
+        project: {
+          select: {
+            id: true,
+            company_id: true,
+            land: { select: { owner_id: true } },
+          },
+        },
+      },
+    });
+
+    if (!investment) {
+      throw new NotFoundException(
+        `Investment with ID "${investmentId}" not found.`,
+      );
+    }
+
+    let fieldToUpdate: 'owner_agree' | 'company_agree';
+    let alreadyRespondedError: string | null = null;
+
+    if (userType === 'LandOwner') {
+      const landOwner = await this.prisma.landOwners.findUnique({
+        where: { user_id: userId },
+        select: { id: true },
+      });
+      if (!landOwner || landOwner.id !== investment.project.land.owner_id) {
+        throw new BadRequestException(
+          'You are not authorized to respond to this investment as a Land Owner.',
+        );
+      }
+      fieldToUpdate = 'owner_agree';
+      if (investment.owner_agree !== Agreement.pending) {
+        alreadyRespondedError = `Land Owner has already responded (${investment.owner_agree}).`;
+      }
+    } else if (userType === 'Company') {
+      const company = await this.prisma.companies.findUnique({
+        where: { user_id: userId },
+        select: { id: true },
+      });
+      if (!company || company.id !== investment.project.company_id) {
+        throw new BadRequestException(
+          'You are not authorized to respond to this investment as a Company.',
+        );
+      }
+      fieldToUpdate = 'company_agree';
+      if (investment.company_agree !== Agreement.pending) {
+        alreadyRespondedError = `Company has already responded (${investment.company_agree}).`;
+      }
+    } else {
+      throw new BadRequestException(`Invalid user type: ${String(userType)}`);
+    }
+
+    if (alreadyRespondedError) {
+      throw new BadRequestException(alreadyRespondedError);
+    }
+
+    const newAgreementStatus =
+      response === 'accept' ? Agreement.accepted : Agreement.rejected;
+
+    const updatedInvestment = await this.prisma.investments.update({
+      where: { id: investmentId },
+      data: {
+        [fieldToUpdate]: newAgreementStatus,
+      },
+    });
+
+    const finalInvestment = await this.prisma.investments.findUnique({
+      where: { id: investmentId },
+    });
+
+    if (!finalInvestment) {
+      throw new NotFoundException(
+        `Investment with ID "${investmentId}" not found after update.`,
+      );
+    }
+
+    let overallInvestmentStatus: InvestmentStatus;
+
+    if (
+      finalInvestment.owner_agree === Agreement.rejected ||
+      finalInvestment.company_agree === Agreement.rejected
+    ) {
+      overallInvestmentStatus = InvestmentStatus.rejected;
+    } else if (
+      finalInvestment.owner_agree === Agreement.accepted &&
+      finalInvestment.company_agree === Agreement.accepted
+    ) {
+      overallInvestmentStatus = InvestmentStatus.accepted;
+    } else {
+      overallInvestmentStatus = InvestmentStatus.pending;
+    }
+
+    if (finalInvestment.status !== overallInvestmentStatus) {
+      await this.prisma.investments.update({
+        where: { id: investmentId },
+        data: {
+          status: overallInvestmentStatus,
+        },
+      });
+    }
+
+    return { ...updatedInvestment, status: overallInvestmentStatus };
+  }
+
   async update(id: string, updateInvestmentDto: UpdateInvestmentDto) {
+    const investment = await this.prisma.investments.findUnique({
+      where: { id },
+    });
+    if (!investment) {
+      throw new NotFoundException(`Investment with ID "${id}" not found.`);
+    }
+    if (investment.status !== InvestmentStatus.pending) {
+      throw new BadRequestException(
+        'Cannot update an investment that is not in pending status.',
+      );
+    }
+
     return this.prisma.investments.update({
       where: { id },
-      data: {
-        ...updateInvestmentDto,
-        value_invested: updateInvestmentDto.value_invested
-          ? String(updateInvestmentDto.value_invested)
-          : undefined,
-      },
+      data: updateInvestmentDto,
     });
   }
 
